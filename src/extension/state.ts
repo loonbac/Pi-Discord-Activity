@@ -56,6 +56,15 @@ export class PresenceState {
       payload.sessionId = partial.sessionId;
     }
 
+    // The user-driven moment survives every rebuild: it is carried like sessionId,
+    // because a payload that drops it makes the helper unable to tell which session
+    // the user is actually working in.
+    if (partial.lastPromptAtMs !== undefined) {
+      payload.lastPromptAtMs = partial.lastPromptAtMs;
+    } else if (this.payload?.lastPromptAtMs !== undefined) {
+      payload.lastPromptAtMs = this.payload.lastPromptAtMs;
+    }
+
     if (includeProjectName) {
       payload.projectName = partial.projectName ?? process.cwd().split(/[\\/]/).pop();
     }

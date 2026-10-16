@@ -15,6 +15,8 @@ export interface PresenceConfig {
   subagentTasksDir?: string;
   /** How often the subagent count is re-read from the records, in milliseconds. */
   subagentRefreshMs: number;
+  /** How often an open session re-publishes to stay in the live registry, in milliseconds. */
+  heartbeatMs: number;
 }
 
 export const defaultConfig: PresenceConfig = {
@@ -30,5 +32,22 @@ export const defaultConfig: PresenceConfig = {
   presenceTimeoutMs: Number(process.env.PI_PRESENCE_TIMEOUT_MS ?? "600000"),
   sessionTtlMs: Number(process.env.PI_PRESENCE_SESSION_TTL_MS ?? "300000"),
   subagentTasksDir: process.env.PI_PRESENCE_SUBAGENT_TASKS_DIR?.trim() || undefined,
-  subagentRefreshMs: Number(process.env.PI_PRESENCE_SUBAGENT_REFRESH_MS ?? "15000")
+  subagentRefreshMs: Number(process.env.PI_PRESENCE_SUBAGENT_REFRESH_MS ?? "15000"),
+  heartbeatMs: Number(process.env.PI_PRESENCE_HEARTBEAT_MS ?? "60000")
+};
+
+/**
+ * The heartbeat interval, read when the heartbeat starts rather than at import.
+ *
+ * A frozen default cannot see an operator changing the environment of a running
+ * session, and it would also freeze a test that sets the variable to shorten the
+ * wait. It always falls back to the same default the config declares.
+ */
+export function resolveHeartbeatMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PI_PRESENCE_HEARTBEAT_MS?.trim();
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return defaultConfig.heartbeatMs;
 };

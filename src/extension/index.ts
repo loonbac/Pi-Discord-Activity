@@ -11,9 +11,10 @@ import type {
   ToolExecutionStartEvent
 } from "@mariozechner/pi-coding-agent";
 import type { ActivityState, PresencePayload } from "../shared/types.js";
+import { defaultConfig, resolveHeartbeatMs } from "../shared/config.js";
 import { PresenceState } from "./state.js";
 import { ensureHelperRunning, isHelperUnavailableError } from "./helper.js";
-import { clearPresence, publishPresence } from "./transport.js";
+import { clearPresence, publishPresence, retirePresence } from "./transport.js";
 
 const LOG_PREFIX = "[pi-discord-activity]";
 const EDITING_TOOLS = new Set(["edit", "write"]);
@@ -23,12 +24,23 @@ export default function (pi: ExtensionAPI): void {
   const state = new PresenceState();
   let agentActive = false;
   let lastPublishedKey: string | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let sessionId: string | undefined;
 
-  const publishCurrent = async (reason: string) => {
+  /**
+   * Publish this session's state, bypassing the local dedupe when asked.
+   *
+   * The heartbeat needs the bypass: an idle session stops publishing because
+   * nothing changes, and the helper would then age it out of the live count.
+   * Sending the same payload again keeps the session live while the helper's own
+   * aggregate dedupe keeps Discord quiet.
+   */
+  const publishCurrent = async (reason: string, options: { force?: boolean } = {}) => {
     const payload = state.snapshot();
     const publishKey = JSON.stringify(payload);
+    const unchanged = publishKey === lastPublishedKey;
 
-    if (publishKey === lastPublishedKey) {
+    if (unchanged && !options.force) {
       return;
     }
 
@@ -54,15 +66,41 @@ export default function (pi: ExtensionAPI): void {
     }
   };
 
+  /**
+   * Keep this session in the helper's live registry while it is open but idle.
+   *
+   * The registry ages out a session that stops reporting, which is how a crashed
+   * session leaves the count. An open session that is simply waiting for the user
+   * must not be mistaken for a crashed one, so it keeps reporting on a timer that
+   * is well inside the registry's TTL.
+   */
+  const startHeartbeat = () => {
+    if (heartbeatTimer) return;
+    const intervalMs = resolveHeartbeatMs();
+    if (intervalMs <= 0) return;
+    heartbeatTimer = setInterval(() => {
+      void publishCurrent("heartbeat", { force: true });
+    }, intervalMs);
+    heartbeatTimer.unref?.();
+  };
+
+  const stopHeartbeat = () => {
+    if (!heartbeatTimer) return;
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  };
+
   pi.on("session_start", async (event: SessionStartEvent, ctx: ExtensionContext) => {
     agentActive = false;
+    sessionId = getSessionId(ctx);
 
     state.startSession({
-      sessionId: getSessionId(ctx),
+      sessionId,
       projectName: getProjectName(ctx),
       provider: ctx.model?.provider,
       model: ctx.model?.id,
       startedAt: Math.floor(Date.now() / 1000),
+      lastPromptAtMs: Date.now(),
       state: "starting"
     });
 
@@ -74,11 +112,12 @@ export default function (pi: ExtensionAPI): void {
 
     log("session_start", {
       reason: event.reason,
-      sessionId: getSessionId(ctx),
+      sessionId,
       model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown"
     });
 
     await publishCurrent("session_start");
+    startHeartbeat();
   });
 
   pi.on("model_select", async (event: ModelSelectEvent) => {
@@ -99,6 +138,8 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_start", async (_event: AgentStartEvent) => {
     agentActive = true;
     state.setActivity("thinking");
+    // A run the user just started is the moment this session is in the foreground.
+    state.update({ lastPromptAtMs: Date.now() });
     log("agent_start", { state: "thinking" });
     await publishCurrent("agent_start");
   });
@@ -127,14 +168,15 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event: SessionShutdownEvent) => {
     agentActive = false;
     state.setActivity("idle");
+    stopHeartbeat();
     log("session_shutdown", { state: "idle" });
 
     try {
-      await clearPresence();
-      log("session_shutdown", { cleared: true });
+      await retirePresence(sessionId ?? "");
+      log("session_shutdown", { retired: sessionId ?? null });
     } catch (error) {
       if (!isHelperUnavailableError(error)) {
-        console.error(`${LOG_PREFIX} Failed to clear presence for session_shutdown`, error);
+        console.error(`${LOG_PREFIX} Failed to retire presence for session_shutdown`, error);
       }
     }
   });
