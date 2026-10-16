@@ -2,6 +2,7 @@ import { DiscordPresenceClient } from "./discord.js";
 import { createPresenceServer } from "./server.js";
 import type { PresencePayload } from "../shared/types.js";
 import { defaultConfig } from "../shared/config.js";
+import { aggregatePresence, type PresenceAggregate, type PresenceSessionEntry } from "../shared/aggregate.js";
 
 const RECOVERABLE_DISCORD_ERROR_PATTERNS = [
   "Could not connect",
@@ -19,64 +20,148 @@ export function createPresenceHandler(
   now: () => number = Date.now,
   schedule: typeof setTimeout = setTimeout,
   cancel: typeof clearTimeout = clearTimeout,
-  presenceTimeoutMs = defaultConfig.presenceTimeoutMs
+  presenceTimeoutMs = defaultConfig.presenceTimeoutMs,
+  sessionTtlMs = defaultConfig.sessionTtlMs,
+  subagentCount: () => number = () => 0
 ) {
+  /**
+   * Every live Pi session, keyed by session id.
+   *
+   * Sessions report to one shared helper, so the helper is the only place that can
+   * see all of them at once. Without the registry the last payload received became
+   * the presence, and the time shown was whichever session happened to publish last.
+   */
+  const live = new Map<string, PresenceSessionEntry>();
   let lastSentAt = 0;
-  let lastSentPayload: PresencePayload | null = null;
-  let pendingPayload: PresencePayload | null = null;
+  let lastSent: PresenceAggregate | null = null;
   let pendingUpdate: ReturnType<typeof setTimeout> | null = null;
-  let lastReceivedAt = 0;
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function sendPresence(payload: PresencePayload): Promise<void> {
+  async function sendAggregate(aggregate: PresenceAggregate): Promise<void> {
     lastSentAt = now();
-    lastSentPayload = payload;
-    pendingPayload = null;
-    lastReceivedAt = now();
+    lastSent = aggregate;
     restartTimeoutMonitor();
-    await client.setPresence(payload);
+    await client.setPresence(payloadFor(aggregate));
   }
 
-  function isEquivalent(a: PresencePayload | null, b: PresencePayload): boolean {
-    return !!a && a.state === b.state && a.model === b.model && a.provider === b.provider && a.projectName === b.projectName;
+  /** The one presence every live session shares, or nothing when no session is live. */
+  function aggregateNow(): PresenceAggregate | null {
+    return aggregatePresence([...live.values()], subagentCount());
+  }
+
+  /**
+   * Dedupe on the aggregate, never on the payload that arrived.
+   *
+   * The previous comparison read the incoming payload only, so an update whose sole
+   * effect was to move the single clock — the longest-open session retiring — was
+   * treated as "nothing changed" and Discord kept the stale start time.
+   */
+  function isEquivalent(a: PresenceAggregate | null, b: PresenceAggregate): boolean {
+    return !!a
+      && a.sessionId === b.sessionId
+      && a.state === b.state
+      && a.model === b.model
+      && a.provider === b.provider
+      && a.startedAt === b.startedAt
+      && a.agents === b.agents
+      && a.subagents === b.subagents
+      && a.privacyMode === b.privacyMode
+      && a.projectName === b.projectName;
+  }
+
+  function payloadFor(aggregate: PresenceAggregate): PresencePayload {
+    return {
+      app: "pi-coding-agent",
+      provider: aggregate.provider,
+      model: aggregate.model,
+      state: aggregate.state,
+      startedAt: aggregate.startedAt,
+      sessionId: aggregate.sessionId,
+      agents: aggregate.agents,
+      subagents: aggregate.subagents,
+      privacyMode: aggregate.privacyMode,
+      ...(aggregate.projectName ? { projectName: aggregate.projectName } : {})
+    };
+  }
+
+  /** A session that stopped reporting is not a session any more. */
+  function prune(): void {
+    if (sessionTtlMs <= 0) return;
+    const cutoff = now() - sessionTtlMs;
+    for (const [key, session] of live) {
+      if (session.lastSeen <= cutoff) live.delete(key);
+    }
   }
 
   async function handlePresence(payload: PresencePayload): Promise<void> {
-    lastReceivedAt = now();
-    restartTimeoutMonitor();
+    const at = now();
+    const key = payload.sessionId?.trim() || "anonymous";
+    const previous = live.get(key);
+    live.set(key, {
+      sessionId: key,
+      payload,
+      lastSeen: at,
+      lastPromptAt: payload.lastPromptAtMs ?? previous?.lastPromptAt ?? at
+    });
+    prune();
+
+    const aggregate = aggregateNow();
+    if (!aggregate) {
+      await stop();
+      return;
+    }
+
+    if (isEquivalent(lastSent, aggregate)) {
+      if (pendingUpdate) {
+        cancel(pendingUpdate);
+        pendingUpdate = null;
+      }
+      return;
+    }
+
+    if (lastSent && now() - lastSentAt < debounceMs) {
+      if (!pendingUpdate) {
+        pendingUpdate = schedule(() => {
+          pendingUpdate = null;
+          const next = aggregateNow();
+          if (next && !isEquivalent(lastSent, next)) void sendAggregate(next);
+        }, debounceMs);
+      }
+      return;
+    }
+
+    await sendAggregate(aggregate);
+  }
+
+  /**
+   * One session ending answers with the presence of the ones that remain.
+   *
+   * The old `clearPresence` was global: closing one Pi wiped the activity of every
+   * other open session, which is why the presence only worked with a single session.
+   */
+  async function handleRetire(sessionId: string): Promise<void> {
+    live.delete(sessionId?.trim() || "anonymous");
+    prune();
+
+    const aggregate = aggregateNow();
+    if (!aggregate) {
+      await stop();
+      return;
+    }
 
     if (pendingUpdate) {
       cancel(pendingUpdate);
       pendingUpdate = null;
     }
-
-    if (isEquivalent(lastSentPayload, payload)) {
-      pendingPayload = null;
-      return;
-    }
-
-    pendingPayload = payload;
-    const timeSinceLastSend = now() - lastSentAt;
-
-    if (lastSentPayload && timeSinceLastSend < debounceMs) {
-      pendingUpdate = schedule(() => {
-        const nextPayload = pendingPayload;
-        pendingUpdate = null;
-        if (!nextPayload || isEquivalent(lastSentPayload, nextPayload)) {
-          return;
-        }
-        void sendPresence(nextPayload);
-      }, debounceMs);
-      return;
-    }
-
-    await sendPresence(payload);
+    if (!isEquivalent(lastSent, aggregate)) await sendAggregate(aggregate);
   }
 
   async function handleClear(): Promise<void> {
-    lastReceivedAt = 0;
-    lastSentPayload = null;
-    pendingPayload = null;
+    live.clear();
+    await stop();
+  }
+
+  async function stop(): Promise<void> {
     if (pendingUpdate) {
       cancel(pendingUpdate);
       pendingUpdate = null;
@@ -85,6 +170,8 @@ export function createPresenceHandler(
       cancel(timeoutTimer);
       timeoutTimer = null;
     }
+    lastSent = null;
+    lastSentAt = 0;
     await client.clearPresence();
   }
 
@@ -93,7 +180,6 @@ export function createPresenceHandler(
       cancel(pendingUpdate);
       pendingUpdate = null;
     }
-    pendingPayload = null;
   }
 
   function restartTimeoutMonitor(): void {
@@ -107,12 +193,12 @@ export function createPresenceHandler(
       if (defaultConfig.debugLogging) {
         console.log("[pi-discord-activity] Presence timed out; clearing Discord activity");
       }
-      void client.clearPresence();
       timeoutTimer = null;
+      void stop();
     }, presenceTimeoutMs);
   }
 
-  return { handlePresence, handleClear, flushPendingUpdate };
+  return { handlePresence, handleRetire, handleClear, flushPendingUpdate };
 }
 
 export async function performShutdown(
@@ -165,8 +251,8 @@ export function isRecoverableDiscordRuntimeError(error: unknown): boolean {
 }
 
 export async function startHelper(): Promise<void> {
-  const { handlePresence, handleClear, flushPendingUpdate } = createPresenceHandler(discord);
-  createPresenceServer(handlePresence, handleClear);
+  const { handlePresence, handleRetire, handleClear, flushPendingUpdate } = createPresenceHandler(discord);
+  createPresenceServer(handlePresence, handleClear, defaultConfig, handleRetire);
 
   void discord.connect().catch((error) => {
     if (defaultConfig.debugLogging) {

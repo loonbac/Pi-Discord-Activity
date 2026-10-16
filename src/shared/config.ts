@@ -9,6 +9,8 @@ export interface PresenceConfig {
   autostartHelper: boolean;
   debugLogging: boolean;
   presenceTimeoutMs: number;
+  /** How long a session stays live without reporting anything, in milliseconds. */
+  sessionTtlMs: number;
 }
 
 export const defaultConfig: PresenceConfig = {
@@ -21,5 +23,6 @@ export const defaultConfig: PresenceConfig = {
   debounceMs: Number(process.env.PI_PRESENCE_DEBOUNCE_MS ?? "2000"),
   autostartHelper: process.env.PI_PRESENCE_AUTOSTART_HELPER !== "false",
   debugLogging: process.env.PI_PRESENCE_DEBUG === "true",
-  presenceTimeoutMs: Number(process.env.PI_PRESENCE_TIMEOUT_MS ?? "600000")
+  presenceTimeoutMs: Number(process.env.PI_PRESENCE_TIMEOUT_MS ?? "600000"),
+  sessionTtlMs: Number(process.env.PI_PRESENCE_SESSION_TTL_MS ?? "300000")
 };

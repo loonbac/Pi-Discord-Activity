@@ -5,7 +5,8 @@ import { defaultConfig, type PresenceConfig } from "../shared/config.js";
 export function createPresenceServer(
   onPresence: (payload: PresencePayload) => Promise<void>,
   onClear: () => Promise<void> = async () => {},
-  config: Pick<PresenceConfig, "serverHost" | "serverPort"> = defaultConfig
+  config: Pick<PresenceConfig, "serverHost" | "serverPort"> = defaultConfig,
+  onRetire: (sessionId: string) => Promise<void> = async () => {}
 ) {
   return http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
@@ -19,6 +20,26 @@ export function createPresenceServer(
       }).catch((error) => {
         console.error("[pi-discord-activity] Failed to process clear request", error);
         res.writeHead(500).end("Internal Server Error");
+      });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/retire") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+
+      req.on("end", async () => {
+        try {
+          const parsed = JSON.parse(body || "{}") as { sessionId?: unknown };
+          const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : "";
+          await onRetire(sessionId);
+          res.writeHead(204).end();
+        } catch (error) {
+          console.error("[pi-discord-activity] Failed to process retire request", error);
+          res.writeHead(400).end("Bad Request");
+        }
       });
       return;
     }
