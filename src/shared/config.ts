@@ -11,6 +11,10 @@ export interface PresenceConfig {
   presenceTimeoutMs: number;
   /** How long a session stays live without reporting anything, in milliseconds. */
   sessionTtlMs: number;
+  /** Where the subagent task records live, when it is not the machine default. */
+  subagentTasksDir?: string;
+  /** How often the subagent count is re-read from the records, in milliseconds. */
+  subagentRefreshMs: number;
 }
 
 export const defaultConfig: PresenceConfig = {
@@ -24,5 +28,7 @@ export const defaultConfig: PresenceConfig = {
   autostartHelper: process.env.PI_PRESENCE_AUTOSTART_HELPER !== "false",
   debugLogging: process.env.PI_PRESENCE_DEBUG === "true",
   presenceTimeoutMs: Number(process.env.PI_PRESENCE_TIMEOUT_MS ?? "600000"),
-  sessionTtlMs: Number(process.env.PI_PRESENCE_SESSION_TTL_MS ?? "300000")
+  sessionTtlMs: Number(process.env.PI_PRESENCE_SESSION_TTL_MS ?? "300000"),
+  subagentTasksDir: process.env.PI_PRESENCE_SUBAGENT_TASKS_DIR?.trim() || undefined,
+  subagentRefreshMs: Number(process.env.PI_PRESENCE_SUBAGENT_REFRESH_MS ?? "15000")
 };
