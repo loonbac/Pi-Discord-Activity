@@ -145,6 +145,13 @@ export function createPresenceHandler(
 
     const aggregate = aggregateNow();
     if (!aggregate) {
+      // Nothing is live. Discard only what Discord is not showing: a retire that
+      // arrives after the presence was already cleared is a no-op, not a reason to
+      // send another clear.
+      if (lastSent === null && live.size === 0) {
+        await goQuiet();
+        return;
+      }
       await stop();
       return;
     }
@@ -159,6 +166,20 @@ export function createPresenceHandler(
   async function handleClear(): Promise<void> {
     live.clear();
     await stop();
+  }
+
+  /** Stop reporting without asking Discord to clear an activity it is not showing. */
+  async function goQuiet(): Promise<void> {
+    if (pendingUpdate) {
+      cancel(pendingUpdate);
+      pendingUpdate = null;
+    }
+    if (timeoutTimer) {
+      cancel(timeoutTimer);
+      timeoutTimer = null;
+    }
+    lastSent = null;
+    lastSentAt = 0;
   }
 
   async function stop(): Promise<void> {
@@ -196,6 +217,10 @@ export function createPresenceHandler(
       timeoutTimer = null;
       void stop();
     }, presenceTimeoutMs);
+    // A timer is never what keeps the process alive: the daemon is held by its HTTP
+    // server, and a caller that finishes its work must be able to exit even while a
+    // timeout is pending.
+    timeoutTimer.unref?.();
   }
 
   return { handlePresence, handleRetire, handleClear, flushPendingUpdate };
