@@ -75,7 +75,9 @@ test("Discord presence activity renders Pi identity, provider/model, and state",
   assert.equal(activity.largeImageText, "Pi Coding Agent");
   assert.equal(activity.smallImageKey, "anthropic");
   assert.equal(activity.smallImageText, "anthropic");
-  assert.equal(activity.details, "Using Pi Coding Agent");
+  // details carries the live summary (agents and subagents) since the owner asked for
+  // it; the Pi identity stays on the large image instead.
+  assert.equal(activity.details, "1 agent");
   assert.equal(activity.state, "claude-sonnet-4-5 • Thinking");
   assert.equal(humanizeState("editing"), "Editing Files");
   assert.equal(normalizeKey("OpenAI/GPT"), "openai-gpt");

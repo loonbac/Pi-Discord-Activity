@@ -293,8 +293,18 @@ export function buildActivity(payload: PresencePayload): Record<string, unknown>
     stateParts.push(payload.projectName);
   }
 
+  // The summary the owner asked for: every agent open and every subagent running
+  // live, as one line. A payload from a single session that never carried the
+  // aggregate still reads as one agent, never as a missing number.
+  const agents = Math.max(1, Math.floor(payload.agents ?? 1));
+  const summary = [`${agents} ${agents === 1 ? "agent" : "agents"}`];
+  const subagents = Math.max(0, Math.floor(payload.subagents ?? 0));
+  if (subagents > 0) {
+    summary.push(`${subagents} ${subagents === 1 ? "subagent" : "subagents"}`);
+  }
+
   return {
-    details: `Using ${defaultConfig.appName}`,
+    details: summary.join(" · "),
     state: stateParts.join(" • "),
     startTimestamp: payload.startedAt,
     largeImageKey: "pi",
