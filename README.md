@@ -131,6 +131,29 @@ Typical next steps for a new user:
 3. optionally set up a background service using [docs/service-recipes.md](./docs/service-recipes.md)
 4. verify the full flow with [docs/verification.md](./docs/verification.md)
 
+## Keeping this fork in sync with upstream
+
+This fork adds the multi-session aggregate to the upstream plugin. The upstream keeps
+improving, so the two lines are kept apart with a rebase, never a merge that hides
+where a change came from:
+
+```bash
+scripts/sync-upstream.sh          # fetch upstream, report, then rebase this branch onto it
+scripts/sync-upstream.sh --dry    # fetch and report only; changes nothing
+```
+
+It fails closed on uncommitted work or a conflict, and after a clean rebase the
+suite is what decides whether the combination is sound:
+
+```bash
+npm ci && npm test
+```
+
+What lives in this fork, so a sync knows what must survive: the live-session
+registry and `/retire` (`src/helper/index.ts`), the aggregate it publishes
+(`src/shared/aggregate.ts`), the live subagent count (`src/helper/subagents.ts`),
+and the summary Discord renders (`src/helper/discord.ts`).
+
 ## Requirements
 
 - Node.js 20+
