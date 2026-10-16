@@ -41,7 +41,26 @@ export function createPresenceHandler(
     lastSentAt = now();
     lastSent = aggregate;
     restartTimeoutMonitor();
+    logAggregate(aggregate);
     await client.setPresence(payloadFor(aggregate));
+  }
+
+  /**
+   * What the helper published, for the operator who needs to see it.
+   *
+   * The daemon is a black box otherwise: the sessions post to it and Discord renders
+   * the result, so when the presence looks wrong there is nothing to read. The line
+   * below states the aggregate in words - how many agents and subagents, which
+   * session is in the foreground and since when - which is also how this feature was
+   * verified against the live daemon.
+   */
+  function logAggregate(aggregate: PresenceAggregate): void {
+    if (!defaultConfig.debugLogging) return;
+    const subagents = aggregate.subagents > 0 ? ` · ${aggregate.subagents} subagents` : "";
+    const clock = new Date(aggregate.startedAt * 1000).toISOString();
+    console.log(
+      `[pi-discord-activity] presence: ${aggregate.agents} agents${subagents} · ${aggregate.provider}/${aggregate.model} ${aggregate.state} · open since ${clock}`
+    );
   }
 
   /** The one presence every live session shares, or nothing when no session is live. */
@@ -140,7 +159,11 @@ export function createPresenceHandler(
    * other open session, which is why the presence only worked with a single session.
    */
   async function handleRetire(sessionId: string): Promise<void> {
-    live.delete(sessionId?.trim() || "anonymous");
+    const key = sessionId?.trim() || "anonymous";
+    live.delete(key);
+    if (defaultConfig.debugLogging) {
+      console.log(`[pi-discord-activity] retired ${key}; ${live.size} session(s) still live`);
+    }
     prune();
 
     const aggregate = aggregateNow();
